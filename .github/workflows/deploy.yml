@@ -4,8 +4,9 @@ on:
   push:
     branches: [main]
     paths:
-      - 'supabase/functions/telegram-bot/**'
-      - 'supabase/migrations/**'
+      - 'functions/telegram-bot/**'
+      - 'migrations/**'
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -31,3 +32,17 @@ jobs:
         run: supabase db push
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Optional smoke test (if SUPABASE_URL & TELEGRAM_WEBHOOK_SECRET set)
+        if: ${{ secrets.SUPABASE_URL != '' && secrets.TELEGRAM_WEBHOOK_SECRET != '' }}
+        run: |
+          set -e
+          echo "Running smoke test against ${{ secrets.SUPABASE_URL }}/functions/v1/telegram-bot"
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${{ secrets.SUPABASE_URL }}/functions/v1/telegram-bot" \
+            -H "Content-Type: application/json" \
+            -H "x-telegram-bot-api-secret-token: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}" \
+            -d '{"update_id":0,"message":{"chat":{"id":0},"text":"/ping"}}')
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "Smoke test failed: HTTP $HTTP_STATUS"
+            exit 1
+          fi
