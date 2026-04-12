@@ -90,7 +90,7 @@ curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
 
 ## Деплой в продакшен
 
-Подробное руководство: [DEPLOY_SUPABASE.md](./DEPLOY_SUPABASE.md)
+Подробное руководство: [DEPLOY.md](./DEPLOY.md)
 
 Краткая последовательность:
 
