@@ -11,6 +11,7 @@ export const initialSessionState: BotSessionState = {
   selectedMessageId: null,
   categoryOptions: [],
   page: 0,
+  categoryFilter: null,
 };
 
 export class SessionsRepository {

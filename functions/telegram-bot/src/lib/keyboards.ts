@@ -78,8 +78,18 @@ export function deleteDailyListKeyboard(messages: DbMessage[], page = 0, pageSiz
   return buildDailyListKeyboard(messages, page, pageSize, "del");
 }
 
-export function deleteCategoryPickKeyboard(categories: string[], page = 0, pageSize = CATEGORY_PICK_PAGE_SIZE): TelegramInlineKeyboardMarkup {
-  return buildCategoryPickKeyboard(categories, page, pageSize, "del:ccat", "del:catpage", "del:back");
+export const UNREAD_CATEGORY_VALUE = "__unread__";
+
+export function deleteCategoryPickKeyboard(
+  categories: string[],
+  page = 0,
+  pageSize = CATEGORY_PICK_PAGE_SIZE,
+  unreadCount = 0,
+): TelegramInlineKeyboardMarkup {
+  return buildCategoryPickKeyboard(categories, page, pageSize, "del:ccat", "del:catpage", "del:back", {
+    unreadCallback: "del:unread",
+    unreadCount,
+  });
 }
 
 export function deleteCategoryListKeyboard(messages: DbMessage[], page = 0, pageSize = CATEGORY_MSG_PAGE_SIZE): TelegramInlineKeyboardMarkup {
@@ -120,8 +130,16 @@ export function editDailyListKeyboard(messages: DbMessage[], page = 0, pageSize 
   return buildDailyListKeyboard(messages, page, pageSize, "ed");
 }
 
-export function editCategoryPickKeyboard(categories: string[], page = 0, pageSize = CATEGORY_PICK_PAGE_SIZE): TelegramInlineKeyboardMarkup {
-  return buildCategoryPickKeyboard(categories, page, pageSize, "ed:ecat", "ed:catpage", "ed:back");
+export function editCategoryPickKeyboard(
+  categories: string[],
+  page = 0,
+  pageSize = CATEGORY_PICK_PAGE_SIZE,
+  unreadCount = 0,
+): TelegramInlineKeyboardMarkup {
+  return buildCategoryPickKeyboard(categories, page, pageSize, "ed:ecat", "ed:catpage", "ed:back", {
+    unreadCallback: "ed:unread",
+    unreadCount,
+  });
 }
 
 export function editCategoryListKeyboard(messages: DbMessage[], page = 0, pageSize = CATEGORY_MSG_PAGE_SIZE): TelegramInlineKeyboardMarkup {
@@ -227,6 +245,7 @@ function buildCategoryPickKeyboard(
   pickPrefix: string,
   pagePrefix: string,
   backCallback: string,
+  unreadOpt?: { unreadCallback: string; unreadCount: number },
 ): TelegramInlineKeyboardMarkup {
   const total = categories.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -234,12 +253,21 @@ function buildCategoryPickKeyboard(
   const start = safePage * pageSize;
   const pageSlice = categories.slice(start, start + pageSize);
 
-  const rows: TelegramInlineKeyboardButton[][] = pageSlice.map((cat, i) => [
-    {
-      text: safeTruncate(cat, 32),
-      callback_data: `${pickPrefix}:${start + i}`,
-    },
-  ]);
+  const rows: TelegramInlineKeyboardButton[][] = [];
+
+  if (unreadOpt) {
+    const label = `🆕 Непрочитанные (${unreadOpt.unreadCount})`;
+    rows.push([{ text: label, callback_data: unreadOpt.unreadCallback }]);
+  }
+
+  for (let i = 0; i < pageSlice.length; i++) {
+    rows.push([
+      {
+        text: safeTruncate(pageSlice[i], 32),
+        callback_data: `${pickPrefix}:${start + i}`,
+      },
+    ]);
+  }
 
   if (totalPages > 1) {
     rows.push([

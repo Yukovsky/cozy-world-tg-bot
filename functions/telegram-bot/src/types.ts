@@ -83,6 +83,7 @@ export type BotSessionState = {
   selectedMessageId: number | null;
   categoryOptions: string[];
   page?: number;
+  categoryFilter?: string | null;
 };
 
 export type BotSessionRecord = {

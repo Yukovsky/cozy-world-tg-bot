@@ -89,26 +89,49 @@ export class MessagesRepository {
     return data?.length ?? 0;
   }
 
-  async listDailyMessages(): Promise<DbMessage[]> {
+  async listDailyMessages(descending = true): Promise<DbMessage[]> {
     const { data, error } = await this.#supabase
       .from(this.#table)
       .select("message_id, content, on_day, type, category, is_read, created_at")
       .not("on_day", "is", null)
-      .order("on_day", { ascending: true });
+      .order("on_day", { ascending: !descending });
 
     if (error) throw new Error(`Ошибка чтения ежедневных: ${error.message}`);
     return (data ?? []) as DbMessage[];
   }
 
-  async listCategoryMessages(category: string): Promise<DbMessage[]> {
+  async listCategoryMessages(category: string, descending = true): Promise<DbMessage[]> {
     const { data, error } = await this.#supabase
       .from(this.#table)
       .select("message_id, content, on_day, type, category, is_read, created_at")
       .eq("category", category)
-      .order("created_at", { ascending: true });
+      .order("created_at", { ascending: !descending });
 
     if (error) throw new Error(`Ошибка чтения сообщений категории: ${error.message}`);
     return (data ?? []) as DbMessage[];
+  }
+
+  async listUnreadCategorized(): Promise<DbMessage[]> {
+    const { data, error } = await this.#supabase
+      .from(this.#table)
+      .select("message_id, content, on_day, type, category, is_read, created_at")
+      .not("category", "is", null)
+      .eq("is_read", false)
+      .order("created_at", { ascending: false });
+
+    if (error) throw new Error(`Ошибка чтения непрочитанных сообщений: ${error.message}`);
+    return (data ?? []) as DbMessage[];
+  }
+
+  async countUnreadCategorized(): Promise<number> {
+    const { count, error } = await this.#supabase
+      .from(this.#table)
+      .select("*", { count: "exact", head: true })
+      .not("category", "is", null)
+      .eq("is_read", false);
+
+    if (error) return 0;
+    return count ?? 0;
   }
 
   async listDailyDates(): Promise<string[]> {

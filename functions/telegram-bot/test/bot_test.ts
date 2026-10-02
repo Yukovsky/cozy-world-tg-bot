@@ -1,5 +1,18 @@
 import { assertEquals, assert, assertStringIncludes } from "jsr:@std/assert";
-import { safeTruncate, formatDailyMessagesPage, formatCategoryMessagesPage, formatCleanupSummary, editDailyListKeyboard, deleteDailyListKeyboard, editCategoryListKeyboard, deleteCategoryListKeyboard, categoryListKeyboard } from "../src/lib/keyboards.ts";
+import {
+  safeTruncate,
+  formatDailyMessagesPage,
+  formatCategoryMessagesPage,
+  formatCleanupSummary,
+  editDailyListKeyboard,
+  deleteDailyListKeyboard,
+  editCategoryListKeyboard,
+  deleteCategoryListKeyboard,
+  categoryListKeyboard,
+  editCategoryPickKeyboard,
+  deleteCategoryPickKeyboard,
+  UNREAD_CATEGORY_VALUE,
+} from "../src/lib/keyboards.ts";
 import { toSafeUtf8String, sanitizeUtf8, truncateToLimit } from "../src/lib/telegram.ts";
 import { handleCallback } from "../src/handlers/callbacks.ts";
 import type { HandlerContext } from "../src/handlers/context.ts";
@@ -380,4 +393,188 @@ Deno.test("Handlers - handleText validates length and handles content", async ()
   assertEquals(sessionState.pendingContent, validText);
   assertStringIncludes(lastSentText, "Хороший текст сообщения 🚀");
 });
+
+Deno.test("Keyboards - Category pick includes unread button when count provided", () => {
+  const categories = ["Общее", "Любовь", "Цитаты"];
+  const editKb = editCategoryPickKeyboard(categories, 0, 8, 5);
+  assertEquals(editKb.inline_keyboard[0][0].text, "🆕 Непрочитанные (5)");
+  assertEquals(editKb.inline_keyboard[0][0].callback_data, "ed:unread");
+  assertEquals(editKb.inline_keyboard[1][0].text, "Общее");
+
+  const delKb = deleteCategoryPickKeyboard(categories, 0, 8, 3);
+  assertEquals(delKb.inline_keyboard[0][0].text, "🆕 Непрочитанные (3)");
+  assertEquals(delKb.inline_keyboard[0][0].callback_data, "del:unread");
+  assertEquals(delKb.inline_keyboard[1][0].text, "Общее");
+});
+
+Deno.test("Handlers - Unread categorized messages edit and delete flow", async () => {
+  const unreadMessages: DbMessage[] = [
+    {
+      message_id: 501,
+      content: "Непрочитанное сообщение 1 🌸",
+      on_day: null,
+      type: "text",
+      category: "Любовь",
+      is_read: false,
+      created_at: "2026-10-01T12:00:00Z",
+    },
+    {
+      message_id: 502,
+      content: "Непрочитанное сообщение 2 💫",
+      on_day: null,
+      type: "text",
+      category: "Вдохновение",
+      is_read: false,
+      created_at: "2026-09-30T10:00:00Z",
+    },
+  ];
+
+  let lastSentText = "";
+  let sessionState: BotSessionState = {
+    flow: "idle",
+    step: "idle",
+    selectedDate: null,
+    selectedCategory: null,
+    selectedType: "text",
+    pendingContent: null,
+    selectedMessageId: null,
+    categoryOptions: [],
+    page: 0,
+    categoryFilter: null,
+  };
+
+  const mockCtx: HandlerContext = {
+    config: {
+      telegramBotToken: "test",
+      telegramWebhookSecret: "secret",
+      supabaseUrl: "http://localhost",
+      supabaseServiceRoleKey: "key",
+      messagesTable: "messages",
+      sessionsTable: "telegram_bot_sessions",
+      timezoneOffsetMinutes: 180,
+      defaultType: "text",
+    },
+    telegram: {
+      editMessageText: (params: { text: string }) => {
+        lastSentText = params.text;
+        return Promise.resolve();
+      },
+      sendMessage: (params: { text: string }) => {
+        lastSentText = params.text;
+        return Promise.resolve();
+      },
+      answerCallbackQuery: () => Promise.resolve(),
+      sendDocument: () => Promise.resolve(),
+      deleteMessage: () => Promise.resolve(true),
+    } as any,
+    messagesRepo: {
+      listDailyMessages: () => Promise.resolve([]),
+      getMessage: (id: number) => Promise.resolve(unreadMessages.find((m) => m.message_id === id) ?? null),
+      listCategories: () => Promise.resolve(["Любовь", "Вдохновение"]),
+      listCategoryMessages: (cat: string) => Promise.resolve(unreadMessages.filter((m) => m.category === cat)),
+      listUnreadCategorized: () => Promise.resolve(unreadMessages),
+      countUnreadCategorized: () => Promise.resolve(unreadMessages.length),
+      deleteMessage: () => Promise.resolve(),
+      updateMessage: () => Promise.resolve(),
+    } as any,
+    sessionsRepo: {
+      get: () => Promise.resolve(sessionState),
+      set: (_chatId: number, state: BotSessionState) => {
+        sessionState = state;
+        return Promise.resolve();
+      },
+      reset: () => {
+        sessionState = {
+          flow: "idle", step: "idle", selectedDate: null, selectedCategory: null,
+          selectedType: "text", pendingContent: null, selectedMessageId: null,
+          categoryOptions: [], page: 0, categoryFilter: null,
+        };
+        return Promise.resolve();
+      },
+    } as any,
+  };
+
+  // 1. Open edit categories list
+  const res1 = await handleCallback(mockCtx, {
+    id: "1",
+    from: { id: 123, first_name: "User" },
+    message: { message_id: 99, chat: { id: 123, type: "private" } },
+    data: "ed:cat",
+  });
+  assertEquals(res1, true);
+  assertEquals(sessionState.step, "edit_cat_pick");
+  assertStringIncludes(lastSentText, "Выберите категорию:");
+
+  // 2. Select unread messages category
+  const res2 = await handleCallback(mockCtx, {
+    id: "2",
+    from: { id: 123, first_name: "User" },
+    message: { message_id: 99, chat: { id: 123, type: "private" } },
+    data: "ed:unread",
+  });
+  assertEquals(res2, true);
+  assertEquals(sessionState.step, "edit_cat_list");
+  assertEquals(sessionState.categoryFilter, UNREAD_CATEGORY_VALUE);
+  assertStringIncludes(lastSentText, "Сообщения в «Непрочитанные»");
+
+  // 3. Select unread message 501 for editing
+  const res3 = await handleCallback(mockCtx, {
+    id: "3",
+    from: { id: 123, first_name: "User" },
+    message: { message_id: 99, chat: { id: 123, type: "private" } },
+    data: "ed:emsg:501",
+  });
+  assertEquals(res3, true);
+  assertEquals(sessionState.step, "edit_input");
+  assertEquals(sessionState.selectedMessageId, 501);
+  assertEquals(sessionState.selectedCategory, "Любовь"); // preserves actual DB category
+  assertEquals(sessionState.categoryFilter, UNREAD_CATEGORY_VALUE);
+  assertStringIncludes(lastSentText, "Редактирование:");
+
+  // 4. Click back to list -> returns to unread list
+  const res4 = await handleCallback(mockCtx, {
+    id: "4",
+    from: { id: 123, first_name: "User" },
+    message: { message_id: 99, chat: { id: 123, type: "private" } },
+    data: "ed:backtolist",
+  });
+  assertEquals(res4, true);
+  assertEquals(sessionState.step, "edit_cat_list");
+  assertStringIncludes(lastSentText, "Сообщения в «Непрочитанные»");
+
+  // 5. Test delete unread flow
+  const res5 = await handleCallback(mockCtx, {
+    id: "5",
+    from: { id: 123, first_name: "User" },
+    message: { message_id: 99, chat: { id: 123, type: "private" } },
+    data: "del:unread",
+  });
+  assertEquals(res5, true);
+  assertEquals(sessionState.step, "delete_cat_list");
+  assertEquals(sessionState.categoryFilter, UNREAD_CATEGORY_VALUE);
+  assertStringIncludes(lastSentText, "Сообщения в «Непрочитанные»");
+
+  // 6. Select message 502 for delete confirmation
+  const res6 = await handleCallback(mockCtx, {
+    id: "6",
+    from: { id: 123, first_name: "User" },
+    message: { message_id: 99, chat: { id: 123, type: "private" } },
+    data: "del:cmsg:502",
+  });
+  assertEquals(res6, true);
+  assertEquals(sessionState.step, "delete_cat_confirm");
+  assertStringIncludes(lastSentText, "Удалить это сообщение?");
+
+  // 7. Click back -> returns to unread list
+  const res7 = await handleCallback(mockCtx, {
+    id: "7",
+    from: { id: 123, first_name: "User" },
+    message: { message_id: 99, chat: { id: 123, type: "private" } },
+    data: "del:goback",
+  });
+  assertEquals(res7, true);
+  assertEquals(sessionState.step, "delete_cat_list");
+  assertStringIncludes(lastSentText, "Сообщения в «Непрочитанные»");
+});
+
 

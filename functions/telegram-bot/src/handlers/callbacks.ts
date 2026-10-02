@@ -23,6 +23,7 @@ import {
   formatMessageSummary,
   mainMenuKeyboard,
   typeKeyboard,
+  UNREAD_CATEGORY_VALUE,
 } from "../lib/keyboards.ts";
 import type { BotSessionState, TelegramCallbackQuery } from "../types.ts";
 import type { HandlerContext } from "./context.ts";
@@ -435,32 +436,65 @@ async function handleDeleteCallback(
   }
 
   if (data === "del:cat") {
-    const categories = await ctx.messagesRepo.listCategories();
-    if (!categories.length) {
+    const [categories, unreadCount] = await Promise.all([
+      ctx.messagesRepo.listCategories(),
+      ctx.messagesRepo.countUnreadCategorized(),
+    ]);
+    if (!categories.length && unreadCount === 0) {
       await ctx.sessionsRepo.reset(chatId);
       await editToMenu(ctx, chatId, mid, "Категорий нет.");
       return true;
     }
 
     await ctx.sessionsRepo.set(chatId, {
-      ...session, step: "delete_cat_pick", categoryOptions: categories, page: 0,
+      ...session, step: "delete_cat_pick", categoryOptions: categories, page: 0, categoryFilter: null,
     });
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
       text: "Выберите категорию:",
-      replyMarkup: deleteCategoryPickKeyboard(categories, 0),
+      replyMarkup: deleteCategoryPickKeyboard(categories, 0, undefined, unreadCount),
     });
     return true;
   }
 
   if (data.startsWith("del:catpage:")) {
     const page = Number(data.replace("del:catpage:", ""));
-    const categories = session.categoryOptions?.length ? session.categoryOptions : await ctx.messagesRepo.listCategories();
-    await ctx.sessionsRepo.set(chatId, { ...session, page, categoryOptions: categories });
+    const [categories, unreadCount] = await Promise.all([
+      session.categoryOptions?.length ? session.categoryOptions : ctx.messagesRepo.listCategories(),
+      ctx.messagesRepo.countUnreadCategorized(),
+    ]);
+    await ctx.sessionsRepo.set(chatId, { ...session, page, categoryOptions: categories, categoryFilter: null });
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
       text: "Выберите категорию:",
-      replyMarkup: deleteCategoryPickKeyboard(categories, page),
+      replyMarkup: deleteCategoryPickKeyboard(categories, page, undefined, unreadCount),
+    });
+    return true;
+  }
+
+  if (data === "del:unread") {
+    const messages = await ctx.messagesRepo.listUnreadCategorized();
+    if (!messages.length) {
+      await ctx.telegram.editMessageText({
+        chatId, messageId: mid,
+        text: "Все категоризированные сообщения уже прочитаны! ✅",
+        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад к категориям", callback_data: "del:cat" }]] },
+      });
+      return true;
+    }
+
+    await ctx.sessionsRepo.set(chatId, {
+      ...session,
+      step: "delete_cat_list",
+      selectedCategory: UNREAD_CATEGORY_VALUE,
+      categoryFilter: UNREAD_CATEGORY_VALUE,
+      page: 0,
+    });
+
+    await ctx.telegram.editMessageText({
+      chatId, messageId: mid,
+      text: formatCategoryMessagesPage("Непрочитанные", messages, 0),
+      replyMarkup: deleteCategoryListKeyboard(messages, 0),
     });
     return true;
   }
@@ -481,7 +515,7 @@ async function handleDeleteCallback(
     }
 
     await ctx.sessionsRepo.set(chatId, {
-      ...session, step: "delete_cat_list", selectedCategory: category, page: 0,
+      ...session, step: "delete_cat_list", selectedCategory: category, categoryFilter: category, page: 0,
     });
 
     await ctx.telegram.editMessageText({
@@ -494,15 +528,20 @@ async function handleDeleteCallback(
 
   if (data.startsWith("del:cpage:")) {
     const page = Number(data.replace("del:cpage:", ""));
+    const isUnread = session.categoryFilter === UNREAD_CATEGORY_VALUE || session.selectedCategory === UNREAD_CATEGORY_VALUE;
     const category = session.selectedCategory;
-    if (!category) return true;
+    if (!category && !isUnread) return true;
 
-    const messages = await ctx.messagesRepo.listCategoryMessages(category);
+    const messages = isUnread
+      ? await ctx.messagesRepo.listUnreadCategorized()
+      : await ctx.messagesRepo.listCategoryMessages(category!);
+
     await ctx.sessionsRepo.set(chatId, { ...session, page });
 
+    const header = isUnread ? "Непрочитанные" : category!;
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
-      text: formatCategoryMessagesPage(category, messages, page),
+      text: formatCategoryMessagesPage(header, messages, page),
       replyMarkup: deleteCategoryListKeyboard(messages, page),
     });
     return true;
@@ -512,9 +551,10 @@ async function handleDeleteCallback(
     const msgId = Number(data.replace("del:cmsg:", ""));
     const msg = await ctx.messagesRepo.getMessage(msgId);
     if (!msg) {
+      const isUnread = session.categoryFilter === UNREAD_CATEGORY_VALUE || session.selectedCategory === UNREAD_CATEGORY_VALUE;
       await ctx.telegram.editMessageText({
         chatId, messageId: mid, text: "Сообщение не найдено.",
-        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "del:cat" }]] },
+        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: isUnread ? "del:unread" : "del:cat" }]] },
       });
       return true;
     }
@@ -543,16 +583,35 @@ async function handleDeleteCallback(
       });
       return true;
     }
-    if (session.step === "delete_cat_confirm" && session.selectedCategory) {
-      const messages = await ctx.messagesRepo.listCategoryMessages(session.selectedCategory);
-      const page = session.page ?? 0;
-      await ctx.sessionsRepo.set(chatId, { ...session, step: "delete_cat_list" });
-      await ctx.telegram.editMessageText({
-        chatId, messageId: mid,
-        text: formatCategoryMessagesPage(session.selectedCategory, messages, page),
-        replyMarkup: deleteCategoryListKeyboard(messages, page),
-      });
-      return true;
+    if (session.step === "delete_cat_confirm") {
+      const isUnread = session.categoryFilter === UNREAD_CATEGORY_VALUE || session.selectedCategory === UNREAD_CATEGORY_VALUE;
+      if (isUnread) {
+        const messages = await ctx.messagesRepo.listUnreadCategorized();
+        const page = session.page ?? 0;
+        await ctx.sessionsRepo.set(chatId, {
+          ...session,
+          step: "delete_cat_list",
+          selectedCategory: UNREAD_CATEGORY_VALUE,
+          categoryFilter: UNREAD_CATEGORY_VALUE,
+        });
+        await ctx.telegram.editMessageText({
+          chatId, messageId: mid,
+          text: formatCategoryMessagesPage("Непрочитанные", messages, page),
+          replyMarkup: deleteCategoryListKeyboard(messages, page),
+        });
+        return true;
+      }
+      if (session.selectedCategory) {
+        const messages = await ctx.messagesRepo.listCategoryMessages(session.selectedCategory);
+        const page = session.page ?? 0;
+        await ctx.sessionsRepo.set(chatId, { ...session, step: "delete_cat_list" });
+        await ctx.telegram.editMessageText({
+          chatId, messageId: mid,
+          text: formatCategoryMessagesPage(session.selectedCategory, messages, page),
+          replyMarkup: deleteCategoryListKeyboard(messages, page),
+        });
+        return true;
+      }
     }
     return handleDeleteCallback(ctx, chatId, mid, "del:back", session);
   }
@@ -727,32 +786,65 @@ async function handleEditCallback(
   }
 
   if (data === "ed:cat") {
-    const categories = await ctx.messagesRepo.listCategories();
-    if (!categories.length) {
+    const [categories, unreadCount] = await Promise.all([
+      ctx.messagesRepo.listCategories(),
+      ctx.messagesRepo.countUnreadCategorized(),
+    ]);
+    if (!categories.length && unreadCount === 0) {
       await ctx.sessionsRepo.reset(chatId);
       await editToMenu(ctx, chatId, mid, "Категорий нет.");
       return true;
     }
 
     await ctx.sessionsRepo.set(chatId, {
-      ...session, step: "edit_cat_pick", categoryOptions: categories, page: 0,
+      ...session, step: "edit_cat_pick", categoryOptions: categories, page: 0, categoryFilter: null,
     });
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
       text: "Выберите категорию:",
-      replyMarkup: editCategoryPickKeyboard(categories, 0),
+      replyMarkup: editCategoryPickKeyboard(categories, 0, undefined, unreadCount),
     });
     return true;
   }
 
   if (data.startsWith("ed:catpage:")) {
     const page = Number(data.replace("ed:catpage:", ""));
-    const categories = session.categoryOptions?.length ? session.categoryOptions : await ctx.messagesRepo.listCategories();
-    await ctx.sessionsRepo.set(chatId, { ...session, page, categoryOptions: categories });
+    const [categories, unreadCount] = await Promise.all([
+      session.categoryOptions?.length ? session.categoryOptions : ctx.messagesRepo.listCategories(),
+      ctx.messagesRepo.countUnreadCategorized(),
+    ]);
+    await ctx.sessionsRepo.set(chatId, { ...session, page, categoryOptions: categories, categoryFilter: null });
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
       text: "Выберите категорию:",
-      replyMarkup: editCategoryPickKeyboard(categories, page),
+      replyMarkup: editCategoryPickKeyboard(categories, page, undefined, unreadCount),
+    });
+    return true;
+  }
+
+  if (data === "ed:unread") {
+    const messages = await ctx.messagesRepo.listUnreadCategorized();
+    if (!messages.length) {
+      await ctx.telegram.editMessageText({
+        chatId, messageId: mid,
+        text: "Все категоризированные сообщения уже прочитаны! ✅",
+        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад к категориям", callback_data: "ed:cat" }]] },
+      });
+      return true;
+    }
+
+    await ctx.sessionsRepo.set(chatId, {
+      ...session,
+      step: "edit_cat_list",
+      selectedCategory: UNREAD_CATEGORY_VALUE,
+      categoryFilter: UNREAD_CATEGORY_VALUE,
+      page: 0,
+    });
+
+    await ctx.telegram.editMessageText({
+      chatId, messageId: mid,
+      text: formatCategoryMessagesPage("Непрочитанные", messages, 0),
+      replyMarkup: editCategoryListKeyboard(messages, 0),
     });
     return true;
   }
@@ -773,7 +865,7 @@ async function handleEditCallback(
     }
 
     await ctx.sessionsRepo.set(chatId, {
-      ...session, step: "edit_cat_list", selectedCategory: category, page: 0,
+      ...session, step: "edit_cat_list", selectedCategory: category, categoryFilter: category, page: 0,
     });
 
     await ctx.telegram.editMessageText({
@@ -786,15 +878,20 @@ async function handleEditCallback(
 
   if (data.startsWith("ed:cpage:")) {
     const page = Number(data.replace("ed:cpage:", ""));
+    const isUnread = session.categoryFilter === UNREAD_CATEGORY_VALUE || session.selectedCategory === UNREAD_CATEGORY_VALUE;
     const category = session.selectedCategory;
-    if (!category) return true;
+    if (!category && !isUnread) return true;
 
-    const messages = await ctx.messagesRepo.listCategoryMessages(category);
+    const messages = isUnread
+      ? await ctx.messagesRepo.listUnreadCategorized()
+      : await ctx.messagesRepo.listCategoryMessages(category!);
+
     await ctx.sessionsRepo.set(chatId, { ...session, page });
 
+    const header = isUnread ? "Непрочитанные" : category!;
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
-      text: formatCategoryMessagesPage(category, messages, page),
+      text: formatCategoryMessagesPage(header, messages, page),
       replyMarkup: editCategoryListKeyboard(messages, page),
     });
     return true;
@@ -804,9 +901,10 @@ async function handleEditCallback(
     const msgId = Number(data.replace("ed:emsg:", ""));
     const msg = await ctx.messagesRepo.getMessage(msgId);
     if (!msg) {
+      const isUnread = session.categoryFilter === UNREAD_CATEGORY_VALUE || session.selectedCategory === UNREAD_CATEGORY_VALUE;
       await ctx.telegram.editMessageText({
         chatId, messageId: mid, text: "Сообщение не найдено.",
-        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "ed:cat" }]] },
+        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: isUnread ? "ed:unread" : "ed:cat" }]] },
       });
       return true;
     }
@@ -830,6 +928,23 @@ async function handleEditCallback(
         chatId, messageId: mid,
         text: formatDailyMessagesPage(messages, page),
         replyMarkup: editDailyListKeyboard(messages, page),
+      });
+      return true;
+    }
+    const isUnread = session.categoryFilter === UNREAD_CATEGORY_VALUE || session.selectedCategory === UNREAD_CATEGORY_VALUE;
+    if (isUnread) {
+      const messages = await ctx.messagesRepo.listUnreadCategorized();
+      const page = session.page ?? 0;
+      await ctx.sessionsRepo.set(chatId, {
+        ...session,
+        step: "edit_cat_list",
+        selectedCategory: UNREAD_CATEGORY_VALUE,
+        categoryFilter: UNREAD_CATEGORY_VALUE,
+      });
+      await ctx.telegram.editMessageText({
+        chatId, messageId: mid,
+        text: formatCategoryMessagesPage("Непрочитанные", messages, page),
+        replyMarkup: editCategoryListKeyboard(messages, page),
       });
       return true;
     }
