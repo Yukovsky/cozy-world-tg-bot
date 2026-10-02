@@ -26,5 +26,4 @@ Desktop.ini
 
 # ─── Deno ──────────────────────────────────────────────
 deno.lock
-deno.json
 .npmrc
