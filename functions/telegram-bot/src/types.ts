@@ -82,6 +82,7 @@ export type BotSessionState = {
   pendingContent: string | null;
   selectedMessageId: number | null;
   categoryOptions: string[];
+  page?: number;
 };
 
 export type BotSessionRecord = {

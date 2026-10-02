@@ -1,0 +1,90 @@
+name: Deploy Telegram Bot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Run Tests
+        run: |
+          deno test --config functions/telegram-bot/deno.json functions/telegram-bot/test/bot_test.ts
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+      SB_SERVICE_ROLE_KEY: ${{ secrets.SB_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        run: |
+          set -e
+          check_set() {
+            if [ -z "$2" ]; then
+              echo "::error::$1 is not set"
+              exit 1
+            else
+              echo "  ✓ $1 is set"
+            fi
+          }
+          echo "--- Checking secrets ---"
+          check_set "SUPABASE_ACCESS_TOKEN"   "$SUPABASE_ACCESS_TOKEN"
+          check_set "SUPABASE_PROJECT_REF"    "$SUPABASE_PROJECT_REF"
+          check_set "SUPABASE_URL"            "$SUPABASE_URL"
+          check_set "TELEGRAM_BOT_TOKEN"      "$TELEGRAM_BOT_TOKEN"
+          check_set "TELEGRAM_WEBHOOK_SECRET" "$TELEGRAM_WEBHOOK_SECRET"
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Prepare directory structure for Supabase CLI
+        run: |
+          if [ ! -d "supabase" ]; then
+            ln -s . supabase
+          fi
+
+      - name: Link project
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
+
+      - name: Set secrets on Supabase
+        run: |
+          supabase secrets set \
+            TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
+            TELEGRAM_WEBHOOK_SECRET="$TELEGRAM_WEBHOOK_SECRET" \
+            SB_URL="$SUPABASE_URL" \
+            SB_SERVICE_ROLE_KEY="$SB_SERVICE_ROLE_KEY" \
+            --project-ref "$SUPABASE_PROJECT_REF"
+
+      - name: Deploy function
+        run: |
+          supabase functions deploy telegram-bot --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
+
+      - name: Smoke test
+        run: |
+          set -e
+          echo "POST $SUPABASE_URL/functions/v1/telegram-bot"
+          HTTP_STATUS=$(curl -s -o /tmp/smoke.json -w "%{http_code}" \
+            -X POST "$SUPABASE_URL/functions/v1/telegram-bot" \
+            -H "Content-Type: application/json" \
+            -H "x-telegram-bot-api-secret-token: $TELEGRAM_WEBHOOK_SECRET" \
+            -d '{"update_id":0,"message":{"chat":{"id":0},"text":"/ping"}}')
+          echo "HTTP $HTTP_STATUS — $(cat /tmp/smoke.json)"
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "::error::Smoke test failed: HTTP $HTTP_STATUS"
+            exit 1
+          fi

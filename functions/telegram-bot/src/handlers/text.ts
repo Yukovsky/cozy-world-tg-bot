@@ -6,19 +6,22 @@ import {
   categoryInputKeyboard,
   formatMessageSummary,
   editInputKeyboard,
+  safeTruncate,
 } from "../lib/keyboards.ts";
+import { toSafeUtf8String } from "../lib/telegram.ts";
 
 export async function handleText(ctx: HandlerContext, message: TelegramMessage): Promise<boolean> {
-  const text = message.text?.trim();
-  if (!text) return false;
+  const rawText = message.text?.trim();
+  if (!rawText) return false;
 
+  const text = toSafeUtf8String(rawText);
   const chatId = message.chat.id;
   const session = await ctx.sessionsRepo.get(chatId);
 
   // ── Daily flow: content input ──────────────────────
   if (session.step === "daily_input" && session.flow === "daily") {
-    if (text.length > 4000) {
-      await ctx.telegram.sendMessage({ chatId, text: "Текст слишком длинный (макс. 4000 символов)." });
+    if (Array.from(text).length > 3500) {
+      await ctx.telegram.sendMessage({ chatId, text: "Текст слишком длинный (макс. 3500 символов)." });
       return true;
     }
 
@@ -38,8 +41,8 @@ export async function handleText(ctx: HandlerContext, message: TelegramMessage):
 
   // ── Category flow: new category name (from empty state OR typed on pick screen) ──
   if ((session.step === "category_new" || session.step === "category_pick") && session.flow === "category") {
-    if (text.length > 100) {
-      await ctx.telegram.sendMessage({ chatId, text: "Название категории слишком длинное (макс. 100)." });
+    if (Array.from(text).length > 100) {
+      await ctx.telegram.sendMessage({ chatId, text: "Название категории слишком длинное (макс. 100 символов)." });
       return true;
     }
 
@@ -57,8 +60,8 @@ export async function handleText(ctx: HandlerContext, message: TelegramMessage):
 
   // ── Category flow: content input ───────────────────
   if (session.step === "category_input" && session.flow === "category") {
-    if (text.length > 4000) {
-      await ctx.telegram.sendMessage({ chatId, text: "Текст слишком длинный (макс. 4000 символов)." });
+    if (Array.from(text).length > 3500) {
+      await ctx.telegram.sendMessage({ chatId, text: "Текст слишком длинный (макс. 3500 символов)." });
       return true;
     }
 
@@ -78,8 +81,8 @@ export async function handleText(ctx: HandlerContext, message: TelegramMessage):
 
   // ── Edit flow: new content ─────────────────────────
   if (session.step === "edit_content" && session.flow === "edit") {
-    if (text.length > 4000) {
-      await ctx.telegram.sendMessage({ chatId, text: "Текст слишком длинный (макс. 4000 символов)." });
+    if (Array.from(text).length > 3500) {
+      await ctx.telegram.sendMessage({ chatId, text: "Текст слишком длинный (макс. 3500 символов)." });
       return true;
     }
 

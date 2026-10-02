@@ -16,6 +16,9 @@ import {
   editDailyListKeyboard,
   editInputKeyboard,
   editKindKeyboard,
+  formatCategoryMessagesPage,
+  formatCleanupSummary,
+  formatDailyMessagesPage,
   formatMessagePreview,
   formatMessageSummary,
   mainMenuKeyboard,
@@ -80,6 +83,7 @@ async function handleStartDaily(ctx: HandlerContext, chatId: number, mid: number
     flow: "daily", step: "daily_input",
     selectedDate: nextFree, selectedCategory: null, selectedType: "text",
     pendingContent: null, selectedMessageId: null, categoryOptions: [],
+    page: 0,
   });
 
   await ctx.telegram.editMessageText({
@@ -178,7 +182,6 @@ async function handleDailyCallback(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("уже существует")) {
-        // Keep session intact, return to input with warning
         await ctx.sessionsRepo.set(chatId, { ...session, step: "daily_input" });
         await ctx.telegram.editMessageText({
           chatId, messageId: mid,
@@ -222,6 +225,7 @@ async function handleStartCategory(ctx: HandlerContext, chatId: number, mid: num
       flow: "category", step: "category_new",
       selectedDate: null, selectedCategory: null, selectedType: "text",
       pendingContent: null, selectedMessageId: null, categoryOptions: [],
+      page: 0,
     });
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
@@ -233,11 +237,12 @@ async function handleStartCategory(ctx: HandlerContext, chatId: number, mid: num
       flow: "category", step: "category_pick",
       selectedDate: null, selectedCategory: null, selectedType: "text",
       pendingContent: null, selectedMessageId: null, categoryOptions: categories,
+      page: 0,
     });
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
       text: "Выберите категорию:",
-      replyMarkup: categoryListKeyboard(categories),
+      replyMarkup: categoryListKeyboard(categories, 0),
     });
   }
   return true;
@@ -247,6 +252,18 @@ async function handleCategoryCallback(
   ctx: HandlerContext, chatId: number, mid: number,
   data: string, session: BotSessionState,
 ): Promise<boolean> {
+
+  if (data.startsWith("cat:page:")) {
+    const page = Number(data.replace("cat:page:", ""));
+    const categories = session.categoryOptions?.length ? session.categoryOptions : await ctx.messagesRepo.listCategories();
+    await ctx.sessionsRepo.set(chatId, { ...session, page, categoryOptions: categories });
+    await ctx.telegram.editMessageText({
+      chatId, messageId: mid,
+      text: "Выберите категорию:",
+      replyMarkup: categoryListKeyboard(categories, page),
+    });
+    return true;
+  }
 
   if (data.startsWith("cat:pick:")) {
     const index = Number(data.replace("cat:pick:", ""));
@@ -266,13 +283,14 @@ async function handleCategoryCallback(
 
   if (data === "cat:reselect") {
     const categories = await ctx.messagesRepo.listCategories();
+    const page = session.page ?? 0;
     await ctx.sessionsRepo.set(chatId, {
       ...session, step: "category_pick", categoryOptions: categories,
     });
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
       text: "Выберите категорию:",
-      replyMarkup: categoryListKeyboard(categories),
+      replyMarkup: categoryListKeyboard(categories, page),
     });
     return true;
   }
@@ -335,6 +353,7 @@ async function handleStartDelete(ctx: HandlerContext, chatId: number, mid: numbe
     flow: "delete", step: "delete_kind",
     selectedDate: null, selectedCategory: null, selectedType: "text",
     pendingContent: null, selectedMessageId: null, categoryOptions: [],
+    page: 0,
   });
 
   await ctx.telegram.editMessageText({
@@ -351,7 +370,7 @@ async function handleDeleteCallback(
 ): Promise<boolean> {
 
   if (data === "del:back") {
-    await ctx.sessionsRepo.set(chatId, { ...session, step: "delete_kind" });
+    await ctx.sessionsRepo.set(chatId, { ...session, step: "delete_kind", page: 0 });
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
       text: "Какое сообщение удалить?",
@@ -368,16 +387,26 @@ async function handleDeleteCallback(
       return true;
     }
 
-    await ctx.sessionsRepo.set(chatId, { ...session, step: "delete_daily_list" });
-
-    const text = messages.map((m) =>
-      `📅 ${m.on_day} [${m.type}] — ${m.content.slice(0, 50)}${m.content.length > 50 ? "..." : ""}`
-    ).join("\n");
+    const page = 0;
+    await ctx.sessionsRepo.set(chatId, { ...session, step: "delete_daily_list", page });
 
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
-      text: `Ежедневные сообщения:\n\n${text}\n\nВыберите сообщение для удаления:`,
-      replyMarkup: deleteDailyListKeyboard(messages),
+      text: formatDailyMessagesPage(messages, page),
+      replyMarkup: deleteDailyListKeyboard(messages, page),
+    });
+    return true;
+  }
+
+  if (data.startsWith("del:dpage:")) {
+    const page = Number(data.replace("del:dpage:", ""));
+    const messages = await ctx.messagesRepo.listDailyMessages();
+    await ctx.sessionsRepo.set(chatId, { ...session, step: "delete_daily_list", page });
+
+    await ctx.telegram.editMessageText({
+      chatId, messageId: mid,
+      text: formatDailyMessagesPage(messages, page),
+      replyMarkup: deleteDailyListKeyboard(messages, page),
     });
     return true;
   }
@@ -388,7 +417,7 @@ async function handleDeleteCallback(
     if (!msg) {
       await ctx.telegram.editMessageText({
         chatId, messageId: mid, text: "Сообщение не найдено.",
-        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "del:back" }]] },
+        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "del:daily" }]] },
       });
       return true;
     }
@@ -414,12 +443,24 @@ async function handleDeleteCallback(
     }
 
     await ctx.sessionsRepo.set(chatId, {
-      ...session, step: "delete_cat_pick", categoryOptions: categories,
+      ...session, step: "delete_cat_pick", categoryOptions: categories, page: 0,
     });
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
       text: "Выберите категорию:",
-      replyMarkup: deleteCategoryPickKeyboard(categories),
+      replyMarkup: deleteCategoryPickKeyboard(categories, 0),
+    });
+    return true;
+  }
+
+  if (data.startsWith("del:catpage:")) {
+    const page = Number(data.replace("del:catpage:", ""));
+    const categories = session.categoryOptions?.length ? session.categoryOptions : await ctx.messagesRepo.listCategories();
+    await ctx.sessionsRepo.set(chatId, { ...session, page, categoryOptions: categories });
+    await ctx.telegram.editMessageText({
+      chatId, messageId: mid,
+      text: "Выберите категорию:",
+      replyMarkup: deleteCategoryPickKeyboard(categories, page),
     });
     return true;
   }
@@ -434,21 +475,35 @@ async function handleDeleteCallback(
       await ctx.telegram.editMessageText({
         chatId, messageId: mid,
         text: `В категории «${category}» нет сообщений.`,
-        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "del:back" }]] },
+        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "del:cat" }]] },
       });
       return true;
     }
 
     await ctx.sessionsRepo.set(chatId, {
-      ...session, step: "delete_cat_list", selectedCategory: category,
+      ...session, step: "delete_cat_list", selectedCategory: category, page: 0,
     });
-
-    const text = messages.map((m, i) => formatMessagePreview(m, i)).join("\n\n");
 
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
-      text: `Сообщения в категории «${category}»:\n\n${text}\n\nВыберите номер для удаления:`,
-      replyMarkup: deleteCategoryListKeyboard(messages),
+      text: formatCategoryMessagesPage(category, messages, 0),
+      replyMarkup: deleteCategoryListKeyboard(messages, 0),
+    });
+    return true;
+  }
+
+  if (data.startsWith("del:cpage:")) {
+    const page = Number(data.replace("del:cpage:", ""));
+    const category = session.selectedCategory;
+    if (!category) return true;
+
+    const messages = await ctx.messagesRepo.listCategoryMessages(category);
+    await ctx.sessionsRepo.set(chatId, { ...session, page });
+
+    await ctx.telegram.editMessageText({
+      chatId, messageId: mid,
+      text: formatCategoryMessagesPage(category, messages, page),
+      replyMarkup: deleteCategoryListKeyboard(messages, page),
     });
     return true;
   }
@@ -459,7 +514,7 @@ async function handleDeleteCallback(
     if (!msg) {
       await ctx.telegram.editMessageText({
         chatId, messageId: mid, text: "Сообщение не найдено.",
-        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "del:back" }]] },
+        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "del:cat" }]] },
       });
       return true;
     }
@@ -478,14 +533,26 @@ async function handleDeleteCallback(
 
   if (data === "del:goback") {
     if (session.step === "delete_daily_confirm") {
-      return handleDeleteCallback(ctx, chatId, mid, "del:daily", session);
+      const messages = await ctx.messagesRepo.listDailyMessages();
+      const page = session.page ?? 0;
+      await ctx.sessionsRepo.set(chatId, { ...session, step: "delete_daily_list" });
+      await ctx.telegram.editMessageText({
+        chatId, messageId: mid,
+        text: formatDailyMessagesPage(messages, page),
+        replyMarkup: deleteDailyListKeyboard(messages, page),
+      });
+      return true;
     }
     if (session.step === "delete_cat_confirm" && session.selectedCategory) {
-      const categories = await ctx.messagesRepo.listCategories();
-      const idx = categories.indexOf(session.selectedCategory);
-      if (idx >= 0) {
-        return handleDeleteCallback(ctx, chatId, mid, `del:ccat:${idx}`, { ...session, categoryOptions: categories });
-      }
+      const messages = await ctx.messagesRepo.listCategoryMessages(session.selectedCategory);
+      const page = session.page ?? 0;
+      await ctx.sessionsRepo.set(chatId, { ...session, step: "delete_cat_list" });
+      await ctx.telegram.editMessageText({
+        chatId, messageId: mid,
+        text: formatCategoryMessagesPage(session.selectedCategory, messages, page),
+        replyMarkup: deleteCategoryListKeyboard(messages, page),
+      });
+      return true;
     }
     return handleDeleteCallback(ctx, chatId, mid, "del:back", session);
   }
@@ -518,15 +585,14 @@ async function handleStartCleanup(ctx: HandlerContext, chatId: number, mid: numb
     flow: "cleanup", step: "cleanup_preview",
     selectedDate: todayIso, selectedCategory: null, selectedType: "text",
     pendingContent: null, selectedMessageId: null, categoryOptions: [],
+    page: 0,
   });
 
-  const preview = expired.map((m) =>
-    `📅 ${m.on_day} [${m.type}] — ${m.content.slice(0, 60)}${m.content.length > 60 ? "..." : ""}`
-  ).join("\n");
+  const text = formatCleanupSummary(expired, todayIso);
 
   await ctx.telegram.editMessageText({
     chatId, messageId: mid,
-    text: `Устаревшие сообщения (до ${todayIso}):\n\n${preview}\n\nВсего: ${expired.length}`,
+    text,
     replyMarkup: cleanupPreviewKeyboard(),
   });
   return true;
@@ -562,7 +628,6 @@ async function handleCleanupCallback(
 
     const deleted = await ctx.messagesRepo.deleteExpiredDaily(todayIso);
     await ctx.sessionsRepo.reset(chatId);
-    // sendDocument creates a new message, so we send menu as new message too
     await ctx.telegram.sendMessage({
       chatId,
       text: `✅ Экспортировано и удалено: ${deleted} сообщений.\n\nВыберите действие:`,
@@ -582,6 +647,7 @@ async function handleStartEdit(ctx: HandlerContext, chatId: number, mid: number)
     flow: "edit", step: "edit_kind",
     selectedDate: null, selectedCategory: null, selectedType: "text",
     pendingContent: null, selectedMessageId: null, categoryOptions: [],
+    page: 0,
   });
 
   await ctx.telegram.editMessageText({
@@ -598,7 +664,7 @@ async function handleEditCallback(
 ): Promise<boolean> {
 
   if (data === "ed:back") {
-    await ctx.sessionsRepo.set(chatId, { ...session, step: "edit_kind" });
+    await ctx.sessionsRepo.set(chatId, { ...session, step: "edit_kind", page: 0 });
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
       text: "Какое сообщение изменить?",
@@ -615,16 +681,26 @@ async function handleEditCallback(
       return true;
     }
 
-    await ctx.sessionsRepo.set(chatId, { ...session, step: "edit_daily_list" });
-
-    const text = messages.map((m) =>
-      `📅 ${m.on_day} [${m.type}] — ${m.content.slice(0, 50)}${m.content.length > 50 ? "..." : ""}`
-    ).join("\n");
+    const page = 0;
+    await ctx.sessionsRepo.set(chatId, { ...session, step: "edit_daily_list", page });
 
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
-      text: `Ежедневные сообщения:\n\n${text}\n\nВыберите для изменения:`,
-      replyMarkup: editDailyListKeyboard(messages),
+      text: formatDailyMessagesPage(messages, page),
+      replyMarkup: editDailyListKeyboard(messages, page),
+    });
+    return true;
+  }
+
+  if (data.startsWith("ed:dpage:")) {
+    const page = Number(data.replace("ed:dpage:", ""));
+    const messages = await ctx.messagesRepo.listDailyMessages();
+    await ctx.sessionsRepo.set(chatId, { ...session, step: "edit_daily_list", page });
+
+    await ctx.telegram.editMessageText({
+      chatId, messageId: mid,
+      text: formatDailyMessagesPage(messages, page),
+      replyMarkup: editDailyListKeyboard(messages, page),
     });
     return true;
   }
@@ -635,7 +711,7 @@ async function handleEditCallback(
     if (!msg) {
       await ctx.telegram.editMessageText({
         chatId, messageId: mid, text: "Сообщение не найдено.",
-        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "ed:back" }]] },
+        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "ed:daily" }]] },
       });
       return true;
     }
@@ -659,12 +735,24 @@ async function handleEditCallback(
     }
 
     await ctx.sessionsRepo.set(chatId, {
-      ...session, step: "edit_cat_pick", categoryOptions: categories,
+      ...session, step: "edit_cat_pick", categoryOptions: categories, page: 0,
     });
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
       text: "Выберите категорию:",
-      replyMarkup: editCategoryPickKeyboard(categories),
+      replyMarkup: editCategoryPickKeyboard(categories, 0),
+    });
+    return true;
+  }
+
+  if (data.startsWith("ed:catpage:")) {
+    const page = Number(data.replace("ed:catpage:", ""));
+    const categories = session.categoryOptions?.length ? session.categoryOptions : await ctx.messagesRepo.listCategories();
+    await ctx.sessionsRepo.set(chatId, { ...session, page, categoryOptions: categories });
+    await ctx.telegram.editMessageText({
+      chatId, messageId: mid,
+      text: "Выберите категорию:",
+      replyMarkup: editCategoryPickKeyboard(categories, page),
     });
     return true;
   }
@@ -679,21 +767,35 @@ async function handleEditCallback(
       await ctx.telegram.editMessageText({
         chatId, messageId: mid,
         text: `В категории «${category}» нет сообщений.`,
-        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "ed:back" }]] },
+        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "ed:cat" }]] },
       });
       return true;
     }
 
     await ctx.sessionsRepo.set(chatId, {
-      ...session, step: "edit_cat_list", selectedCategory: category,
+      ...session, step: "edit_cat_list", selectedCategory: category, page: 0,
     });
-
-    const text = messages.map((m, i) => formatMessagePreview(m, i)).join("\n\n");
 
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
-      text: `Сообщения в «${category}»:\n\n${text}\n\nВыберите номер:`,
-      replyMarkup: editCategoryListKeyboard(messages),
+      text: formatCategoryMessagesPage(category, messages, 0),
+      replyMarkup: editCategoryListKeyboard(messages, 0),
+    });
+    return true;
+  }
+
+  if (data.startsWith("ed:cpage:")) {
+    const page = Number(data.replace("ed:cpage:", ""));
+    const category = session.selectedCategory;
+    if (!category) return true;
+
+    const messages = await ctx.messagesRepo.listCategoryMessages(category);
+    await ctx.sessionsRepo.set(chatId, { ...session, page });
+
+    await ctx.telegram.editMessageText({
+      chatId, messageId: mid,
+      text: formatCategoryMessagesPage(category, messages, page),
+      replyMarkup: editCategoryListKeyboard(messages, page),
     });
     return true;
   }
@@ -704,7 +806,7 @@ async function handleEditCallback(
     if (!msg) {
       await ctx.telegram.editMessageText({
         chatId, messageId: mid, text: "Сообщение не найдено.",
-        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "ed:back" }]] },
+        replyMarkup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "ed:cat" }]] },
       });
       return true;
     }
@@ -717,6 +819,32 @@ async function handleEditCallback(
 
     await editSummary(ctx, chatId, mid, msg.on_day != null);
     return true;
+  }
+
+  if (data === "ed:backtolist") {
+    if (session.selectedDate != null) {
+      const messages = await ctx.messagesRepo.listDailyMessages();
+      const page = session.page ?? 0;
+      await ctx.sessionsRepo.set(chatId, { ...session, step: "edit_daily_list" });
+      await ctx.telegram.editMessageText({
+        chatId, messageId: mid,
+        text: formatDailyMessagesPage(messages, page),
+        replyMarkup: editDailyListKeyboard(messages, page),
+      });
+      return true;
+    }
+    if (session.selectedCategory != null) {
+      const messages = await ctx.messagesRepo.listCategoryMessages(session.selectedCategory);
+      const page = session.page ?? 0;
+      await ctx.sessionsRepo.set(chatId, { ...session, step: "edit_cat_list" });
+      await ctx.telegram.editMessageText({
+        chatId, messageId: mid,
+        text: formatCategoryMessagesPage(session.selectedCategory, messages, page),
+        replyMarkup: editCategoryListKeyboard(messages, page),
+      });
+      return true;
+    }
+    return handleEditCallback(ctx, chatId, mid, "ed:back", session);
   }
 
   if (data === "ed:inputback") {
@@ -798,11 +926,23 @@ async function handleEditCallback(
 
   if (data === "ed:pickcat") {
     const categories = await ctx.messagesRepo.listCategories();
-    await ctx.sessionsRepo.set(chatId, { ...session, categoryOptions: categories });
+    await ctx.sessionsRepo.set(chatId, { ...session, categoryOptions: categories, page: 0 });
     await ctx.telegram.editMessageText({
       chatId, messageId: mid,
       text: "Выберите новую категорию:",
-      replyMarkup: editCategoryReselect(categories),
+      replyMarkup: editCategoryReselect(categories, 0),
+    });
+    return true;
+  }
+
+  if (data.startsWith("ed:recatpage:")) {
+    const page = Number(data.replace("ed:recatpage:", ""));
+    const categories = session.categoryOptions?.length ? session.categoryOptions : await ctx.messagesRepo.listCategories();
+    await ctx.sessionsRepo.set(chatId, { ...session, page, categoryOptions: categories });
+    await ctx.telegram.editMessageText({
+      chatId, messageId: mid,
+      text: "Выберите новую категорию:",
+      replyMarkup: editCategoryReselect(categories, page),
     });
     return true;
   }
@@ -848,7 +988,7 @@ async function handleEditCallback(
 async function handleCheckDates(ctx: HandlerContext, chatId: number, mid: number): Promise<true> {
   await ctx.sessionsRepo.reset(chatId);
 
-  const today = formatYyyyMmDd(nowInOffset(180));
+  const today = formatYyyyMmDd(nowInOffset(ctx.config.timezoneOffsetMinutes));
   const { maxDate, hasTodayOrTomorrow } = await ctx.messagesRepo.checkDateCoverage(today);
 
   const lines: string[] = ["🔍 Проверка дат\n"];

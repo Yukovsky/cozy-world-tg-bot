@@ -10,6 +10,7 @@ export const initialSessionState: BotSessionState = {
   pendingContent: null,
   selectedMessageId: null,
   categoryOptions: [],
+  page: 0,
 };
 
 export class SessionsRepository {

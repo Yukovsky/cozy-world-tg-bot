@@ -6,6 +6,8 @@
 **/secrets.*
 
 # ─── Временные файлы Supabase CLI ──────────────────────
+.branches/
+.temp/
 supabase/.branches/
 supabase/.temp/
 
